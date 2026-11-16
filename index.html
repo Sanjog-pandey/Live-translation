@@ -78,8 +78,8 @@
   </label>
   <label>Claude model
     <select id="model">
-      <option value="claude-opus-5-5">Claude Opus 5.5 (best quality)</option>
-      <option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest, very cheap)</option>
+      <option value="claude-haiku-5-5">Claude Haiku 5.5 (fast, very cheap, recommended)</option>
+      <option value="claude-opus-5-5">Claude Opus 5.5 (best quality, slower)</option>
     </select>
   </label>
 </section>
@@ -162,11 +162,13 @@ $("newBtn").onclick = async () => {
 };
 
 // ---------- translation engines ----------
-let chromeTranslator = null;
-async function getChromeTranslator() {
-  if (chromeTranslator) return chromeTranslator;
-  if (!("Translator" in self)) throw new Error("Chrome built-in translator not available (needs Chrome 138+). Switch engine.");
-  chromeTranslator = await Translator.create({ sourceLanguage: "ko", targetLanguage: "en" });
+let chromeTranslator = null; // a promise, shared so we never create two at once
+function getChromeTranslator() {
+  if (!("Translator" in self)) return Promise.reject(new Error("Chrome built-in translator not available (needs Chrome 138+). Switch engine."));
+  if (!chromeTranslator) {
+    chromeTranslator = Translator.create({ sourceLanguage: "ko", targetLanguage: "en" });
+    chromeTranslator.catch(() => { chromeTranslator = null; }); // allow a retry later
+  }
   return chromeTranslator;
 }
 
@@ -253,8 +255,15 @@ async function translateLine(i) {
 // finish any lines left untranslated from a previous session
 lines.forEach((l, i) => { if (!l.en) queue.push(i); }); pump();
 
-// live preview of what's being said right now (cheap engines only)
+// Live preview of what's being said right now. Uses Chrome's on-device translator
+// when it's available (fast, no network, can't get rate-limited), otherwise Google
+// at a slower rate. Never uses Claude, so the preview costs nothing.
 let interimText = "", interimTimer = null, interimSeq = 0;
+let previewEngine = "google", googlePreviewPausedUntil = 0;
+async function setupPreviewEngine() {
+  try { await getChromeTranslator(); previewEngine = "chrome"; }
+  catch { previewEngine = "google"; }
+}
 function showInterim(ko) {
   interimText = ko;
   const el = $("interim");
@@ -262,16 +271,20 @@ function showInterim(ko) {
   if (!el.firstChild) el.innerHTML = `<div class="en"></div><div class="ko"></div>`;
   el.querySelector(".ko").textContent = ko;
   if (interimTimer) return;
+  const engine = previewEngine;
+  if (engine === "google" && Date.now() < googlePreviewPausedUntil) return;
   interimTimer = setTimeout(async () => {
     interimTimer = null;
     const seq = ++interimSeq, text = interimText;
     if (!text) return;
-    const engine = $("engine").value === "chrome" ? "chrome" : "google";
     try {
       const en = await translate(text, engine);
       if (seq === interimSeq && interimText && el.querySelector(".en")) { el.querySelector(".en").textContent = en + " …"; if (nearBottom()) scrollDown(); }
-    } catch {}
-  }, 600);
+    } catch {
+      // Google refusing? Give it a break so finished lines still get through.
+      if (engine === "google") googlePreviewPausedUntil = Date.now() + 30000;
+    }
+  }, engine === "chrome" ? 300 : 600);
 }
 
 // ---------- speech recognition ----------
@@ -310,6 +323,25 @@ const MAX_CHUNK = 100; // chars of unbroken speech before we cut a line ourselve
 let committed = 0;     // chars of the current unfinished speech already turned into lines
 let startedAt = 0, restartDelay = 150;
 
+// Where the first finished sentence in `text` ends, or 0 if none yet.
+// Looks for sentence-final Korean endings (-습니다, -요, -죠, -다) or punctuation,
+// followed by a space. A sentence only counts once a few more characters have been
+// heard after it, because the recognizer often rewrites the last word or two.
+const SENT_END = /(?:니다|요|죠|다|[.?!])(?=\s)/g;
+const NOT_END = /(?:^|\s)(?:필요|중요|주요|수요|다|바다|또다)$/; // words that only look sentence-final
+const MIN_SENTENCE = 8, SETTLE = 6;
+function sentenceCut(text) {
+  SENT_END.lastIndex = 0;
+  let m;
+  while ((m = SENT_END.exec(text))) {
+    const end = m.index + m[0].length;
+    if (end < MIN_SENTENCE || text.length - end < SETTLE) continue;
+    if (NOT_END.test(text.slice(0, end))) continue;
+    return end;
+  }
+  return 0;
+}
+
 function startRec() {
   rec = new (getSR())();
   rec.lang = "ko-KR"; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
@@ -324,9 +356,14 @@ function startRec() {
       addFinal(text.slice(committed));
       committed = Math.max(0, committed - text.length);
     }
-    // If she never pauses, cut lines at word boundaries ourselves so subtitles keep
-    // flowing. The recognizer keeps running, so no audio is lost.
-    let pending = interim.slice(committed);
+    // Finish a line as soon as a Korean sentence ends, instead of waiting for a pause.
+    // The recognizer keeps running, so no audio is lost.
+    let pending = interim.slice(committed), cut;
+    while ((cut = sentenceCut(pending)) > 0) {
+      addFinal(pending.slice(0, cut));
+      committed += cut; pending = pending.slice(cut);
+    }
+    // If there's no sentence ending for a long stretch, cut at a word boundary anyway.
     while (pending.length > MAX_CHUNK) {
       let cut = pending.lastIndexOf(" ", MAX_CHUNK);
       if (cut < MAX_CHUNK / 2) cut = MAX_CHUNK;
@@ -355,6 +392,7 @@ $("startBtn").onclick = async () => {
   running = !running; updateBtn(); keepAwake(running);
   if (running) {
     if ($("engine").value === "chrome") getChromeTranslator().catch(e => flashStatus("⚠ " + e.message));
+    setupPreviewEngine(); // must start from the click: Chrome needs a user gesture for this
     restartDelay = 150; startRec();
   } else { try { rec && rec.stop(); } catch {} }
 };
