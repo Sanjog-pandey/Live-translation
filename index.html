@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lecture Translator</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --border: #2a2f3a; --text: #f2f4f8;
+    --muted: #8a93a6; --accent: #4f8cff; --live: #ff5a5f; --ko: #9aa4b8;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; }
+  button, select, input, textarea { font: inherit; color: var(--text); background: #222733;
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  #startBtn { background: var(--accent); border-color: var(--accent); font-weight: 600; min-width: 110px; }
+  #startBtn.on { background: var(--live); border-color: var(--live); }
+  .spacer { flex: 1; }
+  #status { font-size: 13px; color: var(--muted); }
+  #status.live::before { content: "● "; color: var(--live); }
+  main { flex: 1; overflow-y: auto; padding: 20px 16px 40px; }
+  .line { max-width: 1000px; margin: 0 auto 18px; }
+  .en { font-size: var(--fs, 28px); line-height: 1.35; }
+  .ko { font-size: calc(var(--fs, 28px) * 0.55); color: var(--ko); margin-top: 4px; }
+  .time { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .pending .en { color: var(--muted); font-style: italic; }
+  #interim { max-width: 1000px; margin: 0 auto; opacity: .75; }
+  #interim .en { color: #c9d4ff; }
+  .hideko .ko { display: none; }
+  #settings { display: none; padding: 14px 16px; border-bottom: 1px solid var(--border);
+    background: var(--panel); gap: 14px; flex-wrap: wrap; }
+  #settings.open { display: flex; }
+  #settings label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  #settings textarea { width: min(460px, 90vw); height: 110px; }
+  #settings input[type=password] { width: min(320px, 90vw); }
+  .hint { font-size: 12px; color: var(--muted); max-width: 460px; }
+  #empty { color: var(--muted); text-align: center; margin-top: 15vh; font-size: 16px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lecture Translator KO→EN</h1>
+  <button id="startBtn">▶ Start</button>
+  <select id="engine" title="Translation engine">
+    <option value="google">Google (free, fast)</option>
+    <option value="chrome">Chrome built-in (offline)</option>
+    <option value="claude">Claude (best, needs key)</option>
+  </select>
+  <label style="font-size:13px;color:var(--muted)">Size
+    <input id="fontSize" type="range" min="18" max="56" value="28" style="vertical-align:middle;padding:0">
+  </label>
+  <label style="font-size:13px;color:var(--muted)"><input id="showKo" type="checkbox" checked> Korean</label>
+  <span class="spacer"></span>
+  <span id="status">Idle</span>
+  <button id="settingsBtn">⚙ Settings</button>
+  <button id="saveBtn">⬇ Save</button>
+  <button id="clearBtn">Clear</button>
+</header>
+
+<section id="settings">
+  <label>Course / subject (helps Claude pick the right terms)
+    <input id="subject" placeholder="e.g. Calculus II, Organic Chemistry">
+  </label>
+  <label>Glossary — one per line: 한국어 = English
+    <textarea id="glossary" placeholder="미분 = derivative&#10;적분 = integral&#10;극한 = limit"></textarea>
+  </label>
+  <label>Anthropic API key (Claude engine only)
+    <input id="apiKey" type="password" placeholder="sk-ant-...">
+    <span class="hint">Stored only in this browser. Get one at console.anthropic.com.</span>
+  </label>
+  <label>Claude model
+    <select id="model">
+      <option value="claude-opus-5-5">Claude Opus 5.5 (best quality)</option>
+      <option value="claude-haiku-5-5">Claude Haiku 5.5 (fastest, very cheap)</option>
+    </select>
+  </label>
+</section>
+
+<main id="main">
+  <div id="empty">Hit <b>Start</b> and allow the microphone.<br>
+    Put your laptop close to the professor, or use a clip-on mic.<br>
+    Use <b>Google Chrome</b>. Edge and Firefox don't support live Korean recognition well.</div>
+  <div id="lines"></div>
+  <div id="interim"></div>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("lt_" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("lt_" + k, JSON.stringify(v)); } catch {} },
+};
+
+// ---------- settings ----------
+const settingIds = ["engine", "subject", "glossary", "apiKey", "model"];
+for (const id of settingIds) {
+  const el = $(id); const saved = store.get(id, null);
+  if (saved !== null) el.value = saved;
+  el.addEventListener("change", () => store.set(id, el.value));
+  el.addEventListener("input", () => store.set(id, el.value));
+}
+$("fontSize").value = store.get("fs", 28);
+const applyFs = () => { document.documentElement.style.setProperty("--fs", $("fontSize").value + "px"); store.set("fs", $("fontSize").value); };
+$("fontSize").addEventListener("input", applyFs); applyFs();
+$("showKo").checked = store.get("showKo", true);
+const applyKo = () => { document.body.classList.toggle("hideko", !$("showKo").checked); store.set("showKo", $("showKo").checked); };
+$("showKo").addEventListener("change", applyKo); applyKo();
+$("settingsBtn").onclick = () => $("settings").classList.toggle("open");
+
+// ---------- transcript ----------
+let lines = store.get("lines", []); // {t, ko, en}
+const linesEl = $("lines");
+function renderLine(l, i) {
+  let div = linesEl.querySelector(`[data-i="${i}"]`);
+  if (!div) { div = document.createElement("div"); div.className = "line"; div.dataset.i = i; linesEl.appendChild(div); }
+  div.classList.toggle("pending", !l.en);
+  div.innerHTML = `<div class="time">${l.t}</div><div class="en"></div><div class="ko"></div>`;
+  div.querySelector(".en").textContent = l.en || "translating…";
+  div.querySelector(".ko").textContent = l.ko;
+}
+function renderAll() { linesEl.innerHTML = ""; lines.forEach(renderLine); $("empty").style.display = lines.length ? "none" : ""; }
+renderAll();
+const main = $("main");
+const nearBottom = () => main.scrollHeight - main.scrollTop - main.clientHeight < 200;
+const scrollDown = () => { main.scrollTop = main.scrollHeight; };
+scrollDown();
+
+$("clearBtn").onclick = () => { if (confirm("Clear the whole transcript?")) { lines = []; store.set("lines", lines); renderAll(); } };
+$("saveBtn").onclick = () => {
+  const txt = lines.map(l => `[${l.t}]\nEN: ${l.en || "(untranslated)"}\nKO: ${l.ko}\n`).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([txt], { type: "text/plain;charset=utf-8" }));
+  a.download = `lecture-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.txt`;
+  a.click(); URL.revokeObjectURL(a.href);
+};
+
+// ---------- translation engines ----------
+let chromeTranslator = null;
+async function getChromeTranslator() {
+  if (chromeTranslator) return chromeTranslator;
+  if (!("Translator" in self)) throw new Error("Chrome built-in translator not available (needs Chrome 138+). Switch engine.");
+  chromeTranslator = await Translator.create({ sourceLanguage: "ko", targetLanguage: "en" });
+  return chromeTranslator;
+}
+
+async function translateGoogle(text) {
+  const url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=ko&tl=en&dt=t&q=" + encodeURIComponent(text);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("Google translate HTTP " + r.status);
+  const j = await r.json();
+  return j[0].map(seg => seg[0]).join("");
+}
+
+let anthropic = null, anthropicKey = null;
+async function getAnthropic() {
+  const key = $("apiKey").value.trim();
+  if (!key) throw new Error("Add your Anthropic API key in Settings, or switch engine.");
+  if (!anthropic || anthropicKey !== key) {
+    const { default: Anthropic } = await import("https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.65.0/+esm");
+    anthropic = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
+    anthropicKey = key;
+  }
+  return anthropic;
+}
+
+async function translateClaude(text) {
+  const client = await getAnthropic();
+  const model = $("model").value;
+  const subject = $("subject").value.trim();
+  const glossary = $("glossary").value.trim();
+  const recent = lines.filter(l => l.en).slice(-4).map(l => `KO: ${l.ko}\nEN: ${l.en}`).join("\n\n");
+  const system =
+`You translate a live university lecture from Korean into natural English subtitles.
+The Korean comes from speech recognition, so it may contain recognition errors, missing punctuation, or fragments; infer what the professor most likely said.
+Output ONLY the English translation of the new segment: no quotes, notes, or Korean.
+${subject ? `Course: ${subject}.` : ""}
+${glossary ? `Always use these term translations:\n${glossary}` : ""}`;
+  const user = `${recent ? `Previous segments, for context only:\n${recent}\n\n` : ""}New segment to translate:\n${text}`;
+  const params = {
+    model, max_tokens: 2000,
+    output_config: { effort: "low" },
+    system,
+    messages: [{ role: "user", content: user }],
+  };
+  let res;
+  if (model === "claude-opus-5-5") {
+    // server-side refusal fallback, on by default for Opus 5.5
+    res = await client.beta.messages.create({ ...params, betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" });
+  } else {
+    res = await client.messages.create(params);
+  }
+  if (res.stop_reason === "refusal") throw new Error("Claude declined this segment");
+  return res.content.filter(b => b.type === "text").map(b => b.text).join("").trim();
+}
+
+async function translate(text, engine = $("engine").value) {
+  if (engine === "chrome") return (await getChromeTranslator()).translate(text);
+  if (engine === "claude") return translateClaude(text);
+  return translateGoogle(text);
+}
+
+// translate finals in order, one at a time
+const queue = [];
+let busy = false;
+async function pump() {
+  if (busy) return; busy = true;
+  while (queue.length) {
+    const i = queue.shift(); const l = lines[i]; const stick = nearBottom();
+    try { l.en = await translate(l.ko); }
+    catch (e) {
+      setStatus("⚠ " + e.message);
+      try { l.en = await translateGoogle(l.ko) + "  ⟨fallback⟩"; } catch { l.en = "⚠ translation failed"; }
+    }
+    store.set("lines", lines); renderLine(l, i); if (stick) scrollDown();
+  }
+  busy = false;
+}
+
+// finish any lines left untranslated from a previous session
+lines.forEach((l, i) => { if (!l.en) queue.push(i); }); pump();
+
+// live preview of what's being said right now (cheap engines only)
+let interimText = "", interimTimer = null, interimSeq = 0;
+function showInterim(ko) {
+  interimText = ko;
+  const el = $("interim");
+  if (!ko) { el.innerHTML = ""; return; }
+  if (!el.firstChild) el.innerHTML = `<div class="en"></div><div class="ko"></div>`;
+  el.querySelector(".ko").textContent = ko;
+  if (interimTimer) return;
+  interimTimer = setTimeout(async () => {
+    interimTimer = null;
+    const seq = ++interimSeq, text = interimText;
+    if (!text) return;
+    const engine = $("engine").value === "chrome" ? "chrome" : "google";
+    try {
+      const en = await translate(text, engine);
+      if (seq === interimSeq && interimText && el.querySelector(".en")) { el.querySelector(".en").textContent = en + " …"; if (nearBottom()) scrollDown(); }
+    } catch {}
+  }, 600);
+}
+
+// ---------- speech recognition ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, running = false;
+function setStatus(s, live = false) { $("status").textContent = s; $("status").classList.toggle("live", live); }
+
+function addFinal(ko) {
+  ko = ko.trim(); if (!ko) return;
+  const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  lines.push({ t, ko, en: "" });
+  const i = lines.length - 1; const stick = nearBottom();
+  $("empty").style.display = "none";
+  renderLine(lines[i], i); store.set("lines", lines);
+  interimSeq++; showInterim("");
+  if (stick) scrollDown();
+  queue.push(i); pump();
+}
+
+function startRec() {
+  rec = new SR();
+  rec.lang = "ko-KR"; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
+  rec.onstart = () => setStatus("Listening", true);
+  rec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) addFinal(r[0].transcript); else interim += r[0].transcript;
+    }
+    // force a cut if she never pauses, so subtitles keep flowing
+    if (interim.length > 120) { addFinal(interim); try { rec.abort(); } catch {} return; }
+    showInterim(interim);
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") { running = false; setStatus("Mic blocked: allow microphone access"); updateBtn(); }
+    else if (e.error !== "no-speech" && e.error !== "aborted") setStatus("⚠ " + e.error + " (restarting)");
+  };
+  rec.onend = () => {
+    if (interimText) addFinal(interimText);
+    if (running) setTimeout(() => { if (running) startRec(); }, 150); else setStatus("Stopped");
+  };
+  rec.start();
+}
+
+function updateBtn() { $("startBtn").textContent = running ? "■ Stop" : "▶ Start"; $("startBtn").classList.toggle("on", running); }
+$("startBtn").onclick = async () => {
+  if (!SR) { alert("This browser has no live speech recognition. Open this file in Google Chrome."); return; }
+  running = !running; updateBtn();
+  if (running) {
+    if ($("engine").value === "chrome") getChromeTranslator().catch(e => setStatus("⚠ " + e.message));
+    startRec();
+  } else { try { rec && rec.stop(); } catch {} }
+};
+document.addEventListener("keydown", (e) => { if (e.code === "Space" && e.target === document.body) { e.preventDefault(); $("startBtn").click(); } });
+</script>
+</body>
+</html>
