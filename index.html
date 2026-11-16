@@ -60,6 +60,7 @@
   <span class="spacer"></span>
   <span id="status">Idle</span>
   <button id="settingsBtn">⚙ Settings</button>
+  <button id="newBtn" title="Stop, save this part, and start a fresh transcript">⏭ New lecture</button>
   <button id="saveBtn">⬇ Save</button>
   <button id="clearBtn">Clear</button>
 </header>
@@ -133,12 +134,31 @@ const scrollDown = () => { main.scrollTop = main.scrollHeight; };
 scrollDown();
 
 $("clearBtn").onclick = () => { if (confirm("Clear the whole transcript?")) { lines = []; queue.length = 0; store.set("lines", lines); renderAll(); } };
-$("saveBtn").onclick = () => {
+function saveTranscript() {
   const txt = lines.map(l => `[${l.t}]\nEN: ${l.en || "(untranslated)"}\nKO: ${l.ko}\n`).join("\n");
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([txt], { type: "text/plain;charset=utf-8" }));
-  a.download = `lecture-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.txt`;
-  a.click(); URL.revokeObjectURL(a.href);
+  a.download = `lecture-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}-${p(d.getMinutes())}.txt`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+$("saveBtn").onclick = saveTranscript;
+
+// New lecture: stop listening, let pending translations finish, save, then clear
+$("newBtn").onclick = async () => {
+  if (!lines.length) { flashStatus("Nothing to save yet"); return; }
+  const btn = $("newBtn"); btn.disabled = true;
+  if (running) { running = false; updateBtn(); keepAwake(false); try { rec && rec.stop(); } catch {} }
+  await new Promise(r => setTimeout(r, 300)); // let the last spoken words land
+  const deadline = Date.now() + 30000;
+  while (lines.some(l => !l.en) && Date.now() < deadline) {
+    setStatus(`Finishing ${lines.filter(l => !l.en).length} translation(s)…`);
+    await new Promise(r => setTimeout(r, 250));
+  }
+  saveTranscript();
+  lines = []; queue.length = 0; store.set("lines", lines); renderAll();
+  btn.disabled = false;
+  setStatus("Saved ✓  Press Start for the next part");
 };
 
 // ---------- translation engines ----------

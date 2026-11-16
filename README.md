@@ -11,6 +11,7 @@ Live English subtitles for Korean lectures, right in the browser. It listens thr
   - **Claude**: best quality. Uses the previous lines for context and follows your glossary. Needs an [Anthropic API key](https://console.anthropic.com).
 - **Glossary and course name**: e.g. `미분 = derivative`, so technical terms come out the same every time.
 - **Transcript**: saved automatically in your browser. **⬇ Save** downloads it as a text file.
+- **⏭ New lecture**: stops listening, waits for the last translations, downloads the transcript and clears it. Use it at each break in a long lecture so storage stays small and a crash can't lose more than one part.
 - Adjustable text size. Press **Space** to start or stop.
 
 ## Usage
